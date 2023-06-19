@@ -3,7 +3,7 @@
  * Application layered TCP/TLS connection API (to be used from TCPIP thread)
  *
  * This file provides a TLS layer using mbedTLS
- * 
+ *
  * This version is currently compatible with the 2.x.x branch (current LTS).
  */
 
@@ -59,6 +59,10 @@
 #include "lwip/apps/altcp_tls_mbedtls_opts.h"
 
 #if LWIP_ALTCP_TLS && LWIP_ALTCP_TLS_MBEDTLS
+#include "mbedtls/version.h"
+#if MBEDTLS_VERSION_MAJOR >= 3
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
+#endif /* #if MBEDTLS_VERSION_MAJOR < 3 */
 
 #include "lwip/altcp.h"
 #include "lwip/altcp_tls.h"
@@ -70,7 +74,11 @@
 /* @todo: which includes are really needed? */
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#if MBEDTLS_VERSION_MAJOR >= 3
+#include "mbedtls/pk.h"
+#else /* #if MBEDTLS_VERSION_MAJOR < 3 */
 #include "mbedtls/certs.h"
+#endif /* #if MBEDTLS_VERSION_MAJOR < 3 */
 #include "mbedtls/x509.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/net_sockets.h"
@@ -81,7 +89,11 @@
 #include "mbedtls/ssl_cache.h"
 #include "mbedtls/ssl_ticket.h"
 
+#if MBEDTLS_VERSION_MAJOR >= 3
+#include "../library/ssl_misc.h" /* to call mbedtls_flush_output after ERR_MEM */
+#else /* #if MBEDTLS_VERSION_MAJOR < 3 */
 #include "mbedtls/ssl_internal.h" /* to call mbedtls_flush_output after ERR_MEM */
+#endif /* #if MBEDTLS_VERSION_MAJOR < 3 */
 
 #include <string.h>
 
@@ -659,6 +671,7 @@ altcp_tls_wrap(struct altcp_tls_config *config, struct altcp_pcb *inner_pcb)
   return ret;
 }
 
+#if defined(MBEDTLS_SSL_CLI_C)
 void
 altcp_tls_init_session(struct altcp_tls_session *session)
 {
@@ -696,6 +709,7 @@ altcp_tls_free_session(struct altcp_tls_session *session)
   if (session)
     mbedtls_ssl_session_free(&session->data);
 }
+#endif /* #if defined(MBEDTLS_SSL_CLI_C) */
 
 void *
 altcp_tls_context(struct altcp_pcb *conn)
@@ -776,7 +790,7 @@ altcp_tls_create_config(int is_server, u8_t cert_count, u8_t pkey_count, int hav
   struct altcp_tls_config *conf;
   mbedtls_x509_crt *mem;
 
-  if (TCP_WND < MBEDTLS_SSL_MAX_CONTENT_LEN) {
+  if (TCP_WND < MBEDTLS_SSL_IN_CONTENT_LEN) {
     LWIP_DEBUGF(ALTCP_MBEDTLS_DEBUG|LWIP_DBG_LEVEL_SERIOUS,
       ("altcp_tls: TCP_WND is smaller than the RX decrypion buffer, connection RX might stall!\n"));
   }
@@ -900,7 +914,12 @@ err_t altcp_tls_config_server_add_privkey_cert(struct altcp_tls_config *config,
     return ERR_VAL;
   }
 
-  ret = mbedtls_pk_parse_key(pkey, (const unsigned char *) privkey, privkey_len, privkey_pass, privkey_pass_len);
+  ret = mbedtls_pk_parse_key(pkey, (const unsigned char *)privkey, privkey_len, privkey_pass, privkey_pass_len
+#if MBEDTLS_VERSION_MAJOR >= 3
+                             , ALTCP_MBEDTLS_RNG_FN, &altcp_tls_entropy_rng->entropy
+#endif /* #if MBEDTLS_VERSION_MAJOR >= 3 */
+  );
+
   if (ret != 0) {
     LWIP_DEBUGF(ALTCP_MBEDTLS_DEBUG, ("mbedtls_pk_parse_public_key failed: %d\n", ret));
     mbedtls_x509_crt_free(srvcert);
@@ -1003,7 +1022,11 @@ altcp_tls_create_config_client_2wayauth(const u8_t *ca, size_t ca_len, const u8_
   }
 
   mbedtls_pk_init(conf->pkey);
-  ret = mbedtls_pk_parse_key(conf->pkey, privkey, privkey_len, privkey_pass, privkey_pass_len);
+  ret = mbedtls_pk_parse_key(conf->pkey, privkey, privkey_len, privkey_pass, privkey_pass_len
+# if MBEDTLS_VERSION_MAJOR >= 3
+                             , ALTCP_MBEDTLS_RNG_FN, &altcp_tls_entropy_rng->entropy
+#endif /* #if MBEDTLS_VERSION_MAJOR >= 3 */
+  );
   if (ret != 0) {
     LWIP_DEBUGF(ALTCP_MBEDTLS_DEBUG, ("mbedtls_pk_parse_key failed: %d 0x%x\n", ret, -1*ret));
     altcp_tls_free_config(conf);
@@ -1189,7 +1212,7 @@ altcp_mbedtls_sndbuf(struct altcp_pcb *conn)
           size_t ret;
 #if defined(MBEDTLS_SSL_MAX_FRAGMENT_LENGTH)
           /* @todo: adjust ssl_added to real value related to negotiated cipher */
-          size_t max_frag_len = mbedtls_ssl_get_max_frag_len(&state->ssl_context);
+          size_t max_frag_len = mbedtls_ssl_get_output_max_frag_len(&state->ssl_context);
           max_len = LWIP_MIN(max_frag_len, max_len);
 #endif
           /* Adjust sndbuf of inner_conn with what added by SSL */
